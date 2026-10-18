@@ -21,8 +21,10 @@ use i_slint_compiler::source_path::{SourcePath, clean_path};
 use i_slint_editor_preview::remote_authentication::{
     self, PairingAnswer, PairingInputFuture, PairingPrompt,
 };
-use i_slint_editor_preview::remote_client::{CONNECT_TIMEOUT, PING_INTERVAL, PONG_TIMEOUT};
-use i_slint_editor_preview::{preview_log_message_to_string, settings_store};
+use i_slint_editor_preview::remote_client::{
+    self, CONNECT_TIMEOUT, PING_INTERVAL, PONG_TIMEOUT,
+};
+use i_slint_editor_preview::preview_log_message_to_string;
 use i_slint_live_preview::file_watcher::{FileChangeKind, FileWatcher, WatchEvent};
 use i_slint_live_preview::protocol::lsp_types::{self, Url};
 use i_slint_live_preview::protocol::{
@@ -34,10 +36,6 @@ use tokio_tungstenite_wasm::{Message, WebSocketStream};
 
 type Error = Box<dyn std::error::Error>;
 type Result<T> = std::result::Result<T, Error>;
-
-/// Where user settings the viewer asks to persist are stored, kept apart from
-/// the LSP's so the two don't overwrite each other.
-const SETTINGS_TOOL_NAME: &str = "slint-viewer";
 
 /// The images and fonts a `.slint` can reference. Mirrors the list the LSP
 /// applies in `tools/lsp/language/preview_files.rs`.
@@ -129,13 +127,13 @@ async fn run_async(options: Options) -> Result<()> {
                 let plain = opening
                     .open(&bytes)
                     .map_err(|_| "A frame from the viewer failed to open; closing the session")?;
-                match postcard::from_bytes::<PreviewToLspMessage>(&plain)? {
-                    PreviewToLspMessage::Pong => last_pong = Instant::now(),
-                    PreviewToLspMessage::Exited => {
-                        eprintln!("The viewer exited");
-                        return Ok(());
+                match postcard::from_bytes::<PreviewToLspMessage>(&plain) {
+                    Ok(PreviewToLspMessage::Pong) => last_pong = Instant::now(),
+                    Ok(message) if remote_client::is_allowed_message(&message) => {
+                        client.handle(message).await?
                     }
-                    message => client.handle(message).await?,
+                    Ok(message) => tracing::debug!("Ignoring {message:?} from the viewer"),
+                    Err(error) => tracing::error!("Failed decoding a message from the viewer: {error}"),
                 }
             }
             _ = ping.tick() => {
@@ -249,7 +247,7 @@ impl Client {
     async fn handle(&mut self, message: PreviewToLspMessage) -> Result<()> {
         use PreviewToLspMessage as M;
         match message {
-            M::RequestState { files, settings } => {
+            M::RequestState { files, .. } => {
                 if files.is_empty() {
                     self.send_state().await?;
                 } else {
@@ -257,25 +255,10 @@ impl Client {
                         self.send_file(&url).await?;
                     }
                 }
-                for name in settings {
-                    if let Some(contents) = settings_store::load(SETTINGS_TOOL_NAME, &name) {
-                        self.send(&LspToPreviewMessage::SetUserSettings { name, contents }).await?;
-                    }
-                }
-            }
-            M::UpdateUserSettings { name, contents } => {
-                if let Err(error) = settings_store::save(SETTINGS_TOOL_NAME, &name, &contents) {
-                    tracing::warn!("Failed to save preview settings: {error}");
-                }
             }
             M::Diagnostics { uri, diagnostics, .. } => self.print_diagnostics(uri, &diagnostics),
             M::DebugMessage { location, message } => {
                 eprintln!("{}", preview_log_message_to_string(&location, &message));
-            }
-            M::SendShowMessage { message } => eprintln!("{}", message.message),
-            M::RequestPreview { component } => {
-                self.preview = component.clone();
-                self.send(&LspToPreviewMessage::ShowPreview(component)).await?;
             }
             message => tracing::debug!("Ignoring {message:?} from the viewer"),
         }

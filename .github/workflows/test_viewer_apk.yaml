@@ -1,0 +1,27 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+# Throwaway: a debug-signed arm64 Viewer APK from this branch, installable
+# next to the store app as dev.slint.viewer.test.
+name: Test Viewer APK
+
+on:
+    push:
+        branches: [ci/viewer-apk-test]
+    workflow_dispatch:
+
+jobs:
+    apk:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v7
+            - uses: ./.github/actions/setup-android-viewer-build
+            - name: Build the native library
+              run: tools/viewer/android/build-native.sh arm64-v8a
+            - name: Build the APK
+              run: gradle --no-daemon assembleDebug -Pslint.abi=arm64-v8a
+              working-directory: tools/viewer/android
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: viewer-apk
+                  path: tools/viewer/android/app/build/outputs/apk/debug/*.apk
